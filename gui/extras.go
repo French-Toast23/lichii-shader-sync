@@ -19,7 +19,7 @@ func openURL(u string) { exec.Command("rundll32", "url.dll,FileProtocolHandler",
 
 func gb(n int64) string { return fmt.Sprintf("%.1f GB", float64(n)/1e9) }
 
-// refreshExtras updates the Share / Undo / Delete backups buttons after a scan.
+// refreshExtras updates the Shaders menu (Share / Undo / Delete backups) after a scan.
 func (a *app) refreshExtras() {
 	extra := 0
 	for _, g := range a.found {
@@ -29,24 +29,63 @@ func (a *app) refreshExtras() {
 			}
 		}
 	}
-	a.shareBtn.SetEnabled(extra > 0 && !a.busy)
+	a.shareAct.SetEnabled(extra > 0 && !a.busy)
 	if extra > 0 {
-		a.shareBtn.SetText(fmt.Sprintf("⇪  Share my shaders (%s)", thousands(extra)))
+		a.shareAct.SetText(fmt.Sprintf("Share my shaders (%s)…", thousands(extra)))
 	} else {
-		a.shareBtn.SetText("⇪  Share my shaders")
+		a.shareAct.SetText("Share my shaders…  (nothing new to share)")
 	}
 	baks := syncer.Backups(a.cfg.DataDir)
 	var size int64
 	for _, b := range baks {
 		size += b.Size
 	}
-	a.undoBtn.SetEnabled(len(baks) > 0 && !a.busy)
-	a.bakBtn.SetEnabled(len(baks) > 0 && !a.busy)
+	a.undoAct.SetEnabled(len(baks) > 0 && !a.busy)
+	a.bakAct.SetEnabled(len(baks) > 0 && !a.busy)
 	if len(baks) > 0 {
-		a.bakBtn.SetText("🗑  Delete backups (" + gb(size) + ")")
+		a.bakAct.SetText("Delete backups (" + gb(size) + ")…")
+		a.undoAct.SetText("Undo last update…")
 	} else {
-		a.bakBtn.SetText("🗑  Delete backups")
+		a.bakAct.SetText("Delete backups  (none)")
+		a.undoAct.SetText("Undo last update  (nothing to undo)")
 	}
+}
+
+// showDetails expands or collapses the log under the buttons.
+func (a *app) showDetails(on bool) {
+	a.log.SetVisible(on)
+	if on {
+		a.detailsLink.SetText(`<a href="toggle">▾ Hide details</a>`)
+	} else {
+		a.detailsLink.SetText(`<a href="toggle">▸ Show details</a>`)
+	}
+}
+
+func (a *app) openShaderFolder() {
+	p := filepath.Join(a.cfg.DataDir, "cache", "shader")
+	if _, err := os.Stat(p); err != nil {
+		p = a.cfg.DataDir
+	}
+	exec.Command("explorer", p).Start()
+}
+
+func (a *app) manualUpdateCheck() {
+	tag, page := syncer.UpdateAvailable(syncer.Repo)
+	if tag == "" {
+		walk.MsgBox(a.mw, "Check for updates", "You have the latest version ("+syncer.Version+").", walk.MsgBoxIconInformation)
+		return
+	}
+	if walk.MsgBox(a.mw, "Update available", "Version "+tag+" is available (you have "+syncer.Version+").\n\nOpen the download page?",
+		walk.MsgBoxYesNo|walk.MsgBoxIconQuestion) == walk.DlgCmdYes {
+		openURL(page)
+	}
+}
+
+func (a *app) about() {
+	walk.MsgBox(a.mw, "About Lichii Shader Sync",
+		"Lichii Shader Sync "+syncer.Version+"\n\nDownloads shared Vulkan shader caches into Lichii / Eden.\n\n"+
+			"Unofficial companion tool - not affiliated with Lichii or Eden.\ngithub.com/"+syncer.Repo,
+		walk.MsgBoxIconInformation)
 }
 
 // doShare exports the shaders the user has that the online pack lacks, for posting in Discord.
@@ -158,4 +197,71 @@ func (a *app) checkForUpdate() {
 			a.updLink.SetVisible(true)
 		})
 	}()
+}
+
+// ---- folders ----
+
+// showDataDir puts the folder in use into the Settings menu; it only appears on the main screen
+// (via the status line) when the folder has no shader cache.
+func (a *app) showDataDir() {
+	a.dataAct.SetText("Lichii data folder…  (" + a.cfg.DataDir + ")")
+	exe := "not set"
+	if a.cfg.LichiiExe != "" {
+		exe = a.cfg.LichiiExe
+	}
+	a.exeAct.SetText("Lichii program…  (" + exe + ")")
+}
+
+// doPickData lets the user point the app at their Lichii data folder (the one holding cache\shader).
+func (a *app) doPickData() {
+	dlg := walk.FileDialog{Title: "Pick your Lichii data folder (the one that contains cache\\shader)", InitialDirPath: a.cfg.DataDir}
+	if ok, _ := dlg.ShowBrowseFolder(a.mw); !ok {
+		return
+	}
+	dir := dlg.FilePath
+	// accept the shader folder itself or a game folder too, and walk up to the data folder
+	for i := 0; i < 3; i++ {
+		if st, err := os.Stat(filepath.Join(dir, "cache", "shader")); err == nil && st.IsDir() {
+			break
+		}
+		dir = filepath.Dir(dir)
+	}
+	if st, err := os.Stat(filepath.Join(dir, "cache", "shader")); err != nil || !st.IsDir() {
+		walk.MsgBox(a.mw, "No shader cache there",
+			"That folder doesn't contain cache\\shader.\n\nPick Lichii's data folder: %APPDATA%\\eden for a normal install, or the \"user\" folder next to lichii.exe for a portable one.",
+			walk.MsgBoxIconWarning)
+		return
+	}
+	a.cfg.DataDir = dir
+	a.saveSettings()
+	a.showDataDir()
+	a.refresh()
+}
+
+// doResetExe forgets the remembered lichii.exe and asks for it again.
+func (a *app) doResetExe() {
+	dlg := walk.FileDialog{Title: "Where is lichii.exe?", Filter: "lichii.exe|lichii.exe|Programs (*.exe)|*.exe"}
+	if a.cfg.LichiiExe != "" {
+		dlg.InitialDirPath = filepath.Dir(a.cfg.LichiiExe)
+	}
+	if ok, _ := dlg.ShowOpen(a.mw); !ok {
+		return
+	}
+	a.cfg.LichiiExe = dlg.FilePath
+	// a portable Lichii keeps its data next to the exe: switch to it automatically
+	if p := detectData(a.cfg.LichiiExe); p != syncer.DefaultData() && p != a.cfg.DataDir {
+		a.cfg.DataDir = p
+		a.Log("using portable Lichii data folder " + p)
+		a.showDataDir()
+		a.refresh()
+	}
+	a.saveSettings()
+	a.showDataDir()
+	a.Log("Lichii: " + a.cfg.LichiiExe)
+}
+
+func (a *app) saveSettings() {
+	if err := a.cfg.save(); err != nil {
+		a.Log("could not save settings: " + err.Error())
+	}
 }

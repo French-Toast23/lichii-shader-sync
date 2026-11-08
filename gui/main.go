@@ -33,26 +33,53 @@ type settings struct {
 	DataDir   string `json:"data_dir"`
 }
 
-func settingsPath() string {
-	return filepath.Join(os.Getenv("APPDATA"), "lichii-sync", "settings.json")
+// Settings live in %APPDATA%\lichii-sync\settings.json, or next to the app when %APPDATA% can't be
+// written (e.g. a locked-down C: drive). A copy next to the app wins when both exist.
+func settingsPaths() (local, appdata string) {
+	if exe, err := os.Executable(); err == nil {
+		local = filepath.Join(filepath.Dir(exe), "lichii-sync-settings.json")
+	}
+	return local, filepath.Join(os.Getenv("APPDATA"), "lichii-sync", "settings.json")
 }
 
 func loadSettings() settings {
 	s := settings{}
-	if b, err := ioutil.ReadFile(settingsPath()); err == nil {
-		b = bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")) // tolerate a UTF-8 BOM (e.g. saved by Notepad)
-		json.Unmarshal(b, &s)
+	local, appdata := settingsPaths()
+	for _, p := range []string{local, appdata} {
+		if b, err := ioutil.ReadFile(p); err == nil {
+			b = bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")) // tolerate a UTF-8 BOM (e.g. saved by Notepad)
+			json.Unmarshal(b, &s)
+			break
+		}
 	}
 	if s.DataDir == "" {
-		s.DataDir = syncer.DefaultData()
+		s.DataDir = detectData(s.LichiiExe)
 	}
 	return s
 }
 
-func (s settings) save() {
-	os.MkdirAll(filepath.Dir(settingsPath()), 0o755)
+// detectData prefers a portable Lichii ("user" folder next to lichii.exe) over %APPDATA%\eden.
+func detectData(lichiiExe string) string {
+	if lichiiExe != "" {
+		p := filepath.Join(filepath.Dir(lichiiExe), "user")
+		if st, err := os.Stat(filepath.Join(p, "cache", "shader")); err == nil && st.IsDir() {
+			return p
+		}
+	}
+	return syncer.DefaultData()
+}
+
+func (s settings) save() error {
 	b, _ := json.MarshalIndent(s, "", " ")
-	ioutil.WriteFile(settingsPath(), b, 0o644)
+	local, appdata := settingsPaths()
+	if _, err := os.Stat(local); err == nil { // already using the copy next to the app
+		return ioutil.WriteFile(local, b, 0o644)
+	}
+	os.MkdirAll(filepath.Dir(appdata), 0o755)
+	if err := ioutil.WriteFile(appdata, b, 0o644); err != nil {
+		return ioutil.WriteFile(local, b, 0o644)
+	}
+	return nil
 }
 
 // ---- games table ----
@@ -105,23 +132,23 @@ func (m *gameModel) selected() []row {
 // ---- app ----
 
 type app struct {
-	mw        *walk.MainWindow
-	table     *walk.TableView
-	model     *gameModel
-	status    *walk.Label
-	bar       *walk.ProgressBar
-	log       *walk.TextEdit
-	syncBtn   *walk.PushButton
-	launchBtn *walk.PushButton
-	shareBtn  *walk.PushButton
-	undoBtn   *walk.PushButton
-	bakBtn    *walk.PushButton
-	updLink   *walk.LinkLabel
-	cfg       settings
-	found     []*syncer.Game
-	busy      bool
-	syncing   bool  // a download is running (the main button is Cancel)
-	cancel    int32 // set to 1 to stop the running sync
+	mw          *walk.MainWindow
+	table       *walk.TableView
+	model       *gameModel
+	status      *walk.Label
+	bar         *walk.ProgressBar
+	log         *walk.TextEdit
+	syncBtn     *walk.PushButton
+	launchBtn   *walk.PushButton
+	updLink     *walk.LinkLabel
+	detailsLink *walk.LinkLabel
+	// menu actions
+	dataAct, exeAct, shareAct, undoAct, bakAct *walk.Action
+	cfg                                        settings
+	found                                      []*syncer.Game
+	busy                                       bool
+	syncing                                    bool  // a download is running (the main button is Cancel)
+	cancel                                     int32 // set to 1 to stop the running sync
 }
 
 func (a *app) Log(m string) { a.mw.Synchronize(func() { a.log.AppendText(m + "\r\n") }) }
@@ -141,8 +168,10 @@ func (a *app) setStatus(s string, c walk.Color) {
 
 func (a *app) setBusy(b bool) {
 	a.busy = b
-	for _, w := range []*walk.PushButton{a.syncBtn, a.launchBtn, a.shareBtn, a.undoBtn, a.bakBtn} {
-		w.SetEnabled(!b)
+	a.syncBtn.SetEnabled(!b)
+	a.launchBtn.SetEnabled(!b)
+	for _, act := range []*walk.Action{a.dataAct, a.exeAct, a.shareAct, a.undoAct, a.bakAct} {
+		act.SetEnabled(!b)
 	}
 }
 
@@ -169,7 +198,7 @@ func (a *app) refresh() {
 		a.mw.Synchronize(func() {
 			a.setBusy(false)
 			if err != nil {
-				a.setStatus(err.Error(), pinkDark)
+				a.setStatus(err.Error()+"  (Settings → Lichii data folder)", pinkDark)
 				return
 			}
 			a.found = games
@@ -311,6 +340,7 @@ func (a *app) doSync() {
 			}
 			if err != nil {
 				a.Log("ERROR: " + err.Error())
+				a.showDetails(true)
 				a.setStatus("Something went wrong - your shaders were not changed. See details.", pinkDark)
 				return
 			}
@@ -328,7 +358,7 @@ func (a *app) doLaunch() {
 		}
 		exe = dlg.FilePath
 		a.cfg.LichiiExe = exe
-		a.cfg.save()
+		a.saveSettings()
 	}
 	cmd := exec.Command(exe)
 	cmd.Dir = filepath.Dir(exe)
@@ -353,9 +383,39 @@ func main() {
 		AssignTo: &a.mw,
 		Title:    "Lichii Shader Sync",
 		Icon:     appIcon,
-		Size:     Size{Width: 760, Height: 620},
-		MinSize:  Size{Width: 520, Height: 420},
+		Size:     Size{Width: 780, Height: 560},
+		MinSize:  Size{Width: 560, Height: 440},
 		Layout:   VBox{MarginsZero: true, SpacingZero: true},
+		MenuItems: []MenuItem{
+			Menu{
+				Text: "&Settings",
+				Items: []MenuItem{
+					Action{AssignTo: &a.dataAct, Text: "Lichii data folder…", OnTriggered: a.doPickData},
+					Action{AssignTo: &a.exeAct, Text: "Lichii program…", OnTriggered: a.doResetExe},
+					Action{Text: "Open shader folder", OnTriggered: a.openShaderFolder},
+					Separator{},
+					Action{Text: "E&xit", OnTriggered: func() { a.mw.Close() }},
+				},
+			},
+			Menu{
+				Text: "S&haders",
+				Items: []MenuItem{
+					Action{AssignTo: &a.shareAct, Text: "Share my shaders…", Enabled: false, OnTriggered: a.doShare},
+					Separator{},
+					Action{AssignTo: &a.undoAct, Text: "Undo last update", Enabled: false, OnTriggered: a.doUndo},
+					Action{AssignTo: &a.bakAct, Text: "Delete backups", Enabled: false, OnTriggered: a.doDeleteBackups},
+				},
+			},
+			Menu{
+				Text: "&Help",
+				Items: []MenuItem{
+					Action{Text: "Check for updates", OnTriggered: a.manualUpdateCheck},
+					Action{Text: "Project page", OnTriggered: func() { openURL("https://github.com/" + syncer.Repo) }},
+					Separator{},
+					Action{Text: "About", OnTriggered: a.about},
+				},
+			},
+		},
 		Children: []Widget{
 			// header band
 			Composite{
@@ -412,20 +472,16 @@ func main() {
 						},
 					},
 					Composite{
-						Layout: HBox{MarginsZero: true, Spacing: 8},
+						Layout: HBox{MarginsZero: true},
 						Children: []Widget{
-							PushButton{AssignTo: &a.shareBtn, Text: "⇪  Share my shaders", Enabled: false, OnClicked: a.doShare,
-								ToolTipText: "Save the shaders you have that the online pack doesn't, to post in Discord"},
-							PushButton{AssignTo: &a.undoBtn, Text: "↶  Undo last update", Enabled: false, OnClicked: a.doUndo,
-								ToolTipText: "Restore each cache to the version before its last update"},
-							PushButton{AssignTo: &a.bakBtn, Text: "🗑  Delete backups", Enabled: false, OnClicked: a.doDeleteBackups,
-								ToolTipText: "Free the disk space used by the .bak copies"},
 							HSpacer{},
+							LinkLabel{AssignTo: &a.detailsLink, Text: `<a href="toggle">▸ Show details</a>`,
+								OnLinkActivated: func(*walk.LinkLabelLink) { a.showDetails(!a.log.Visible()) }},
 						},
 					},
-					Label{Text: "DETAILS", Font: Font{Family: "Segoe UI Semibold", PointSize: 8}, TextColor: grey},
-					TextEdit{AssignTo: &a.log, ReadOnly: true, VScroll: true, MinSize: Size{Height: 70},
+					TextEdit{AssignTo: &a.log, ReadOnly: true, VScroll: true, Visible: false, MinSize: Size{Height: 90},
 						Font: Font{Family: "Consolas", PointSize: 9}},
+					VSpacer{},
 				},
 			},
 		},
@@ -434,6 +490,7 @@ func main() {
 		walk.MsgBox(nil, "Lichii Shader Sync", err.Error(), walk.MsgBoxIconError)
 		return
 	}
+	a.showDataDir()
 	a.refresh()
 	a.checkForUpdate()
 	a.mw.Run()

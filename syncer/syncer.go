@@ -238,7 +238,8 @@ func SyncFiles(repo string, g *Game, files []*CacheFile, r Reporter) error {
 	if g.Manifest == nil {
 		return nil
 	}
-	dir, err := ioutil.TempDir("", "lichii-sync-")
+	// download onto the cache's own drive (next to the game folders), not %TEMP% on C:
+	dir, err := ioutil.TempDir(filepath.Dir(g.Dir), ".lichii-sync-")
 	if err != nil {
 		return err
 	}
