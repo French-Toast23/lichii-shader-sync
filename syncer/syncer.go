@@ -34,6 +34,7 @@ var TitleRe = regexp.MustCompile(`^[0-9a-fA-F]{16}$`)
 type Reporter interface {
 	Log(msg string)
 	Progress(done, total int64) // bytes of chunks downloaded so far / to download
+	Cancelled() bool            // checked between chunks; true stops the sync cleanly
 }
 
 func DefaultData() string {
@@ -229,6 +230,11 @@ func (s *chunkStore) entries(c pack.Chunk) ([]cache.Entry, error) {
 
 // SyncGame downloads what each local cache file of g is missing and merges it in.
 func SyncGame(repo string, g *Game, r Reporter) error {
+	return SyncFiles(repo, g, g.Files, r)
+}
+
+// SyncFiles is SyncGame limited to the given cache files of g (e.g. the rows a user ticked).
+func SyncFiles(repo string, g *Game, files []*CacheFile, r Reporter) error {
 	if g.Manifest == nil {
 		return nil
 	}
@@ -238,7 +244,7 @@ func SyncGame(repo string, g *Game, r Reporter) error {
 	}
 	defer os.RemoveAll(dir)
 	store := &chunkStore{base: "https://github.com/" + repo + "/releases/download/", dir: dir}
-	for _, cf := range g.Files {
+	for _, cf := range files {
 		name := filepath.Base(cf.Path)
 		if cf.idx == nil {
 			r.Log(fmt.Sprintf("skip %s: %v", name, cf.Err))
@@ -251,6 +257,10 @@ func SyncGame(repo string, g *Game, r Reporter) error {
 		}
 		r.Log(fmt.Sprintf("%s: getting %d new pipelines (%.0f MB)", name, miss, float64(size)/1e6))
 		added, err := mergeInto(cf, need, size, store, r)
+		if err == ErrCancelled {
+			r.Log(name + ": cancelled, file unchanged")
+			return ErrCancelled
+		}
 		if err != nil {
 			r.Log(fmt.Sprintf("%s: skipped, %v (your file was not changed)", name, err))
 			continue
@@ -285,6 +295,9 @@ func mergeInto(cf *CacheFile, need []pack.Chunk, size int64, store *chunkStore, 
 	var done int64
 	r.Progress(0, size)
 	for _, c := range need {
+		if r.Cancelled() {
+			return fail(ErrCancelled)
+		}
 		es, err := store.entries(c)
 		if err != nil {
 			return fail(err)

@@ -2,12 +2,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
@@ -38,6 +40,7 @@ func settingsPath() string {
 func loadSettings() settings {
 	s := settings{}
 	if b, err := ioutil.ReadFile(settingsPath()); err == nil {
+		b = bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")) // tolerate a UTF-8 BOM (e.g. saved by Notepad)
 		json.Unmarshal(b, &s)
 	}
 	if s.DataDir == "" {
@@ -56,18 +59,47 @@ func (s settings) save() {
 
 type row struct {
 	name, have, online, status string
-	pending                    bool
+	pending                    bool // has new shaders to download
+	checked                    bool // ticked by the user
+	game                       *syncer.Game
+	file                       *syncer.CacheFile
 }
 
 type gameModel struct {
 	walk.TableModelBase
-	rows []row
+	rows     []row
+	onChange func()
 }
 
 func (m *gameModel) RowCount() int { return len(m.rows) }
 func (m *gameModel) Value(r, c int) interface{} {
 	x := m.rows[r]
 	return [...]string{x.name, x.have, x.online, x.status}[c]
+}
+
+// Checked / SetChecked make the TableView show a checkbox per row (walk.ItemChecker).
+// Only rows with new shaders can be ticked.
+func (m *gameModel) Checked(r int) bool { return m.rows[r].checked }
+func (m *gameModel) SetChecked(r int, checked bool) error {
+	m.rows[r].checked = checked && m.rows[r].pending
+	if !m.rows[r].pending {
+		m.PublishRowChanged(r)
+	}
+	if m.onChange != nil {
+		m.onChange()
+	}
+	return nil
+}
+
+// selected returns the ticked rows that have something to download.
+func (m *gameModel) selected() []row {
+	var out []row
+	for _, r := range m.rows {
+		if r.checked && r.pending {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // ---- app ----
@@ -81,9 +113,15 @@ type app struct {
 	log       *walk.TextEdit
 	syncBtn   *walk.PushButton
 	launchBtn *walk.PushButton
+	shareBtn  *walk.PushButton
+	undoBtn   *walk.PushButton
+	bakBtn    *walk.PushButton
+	updLink   *walk.LinkLabel
 	cfg       settings
 	found     []*syncer.Game
 	busy      bool
+	syncing   bool  // a download is running (the main button is Cancel)
+	cancel    int32 // set to 1 to stop the running sync
 }
 
 func (a *app) Log(m string) { a.mw.Synchronize(func() { a.log.AppendText(m + "\r\n") }) }
@@ -103,8 +141,9 @@ func (a *app) setStatus(s string, c walk.Color) {
 
 func (a *app) setBusy(b bool) {
 	a.busy = b
-	a.syncBtn.SetEnabled(!b)
-	a.launchBtn.SetEnabled(!b)
+	for _, w := range []*walk.PushButton{a.syncBtn, a.launchBtn, a.shareBtn, a.undoBtn, a.bakBtn} {
+		w.SetEnabled(!b)
+	}
 }
 
 func gameName(g *syncer.Game) string {
@@ -134,6 +173,13 @@ func (a *app) refresh() {
 				return
 			}
 			a.found = games
+			// remember rows the user unticked, so a refresh doesn't tick them again
+			unticked := map[string]bool{}
+			for _, r := range a.model.rows {
+				if r.pending && !r.checked && r.file != nil {
+					unticked[r.file.Path] = true
+				}
+			}
 			var rows []row
 			todo := 0
 			for _, g := range games {
@@ -147,13 +193,13 @@ func (a *app) refresh() {
 				}
 				// one row per Lichii build: each build keeps its own cache file
 				for _, f := range g.Files {
-					r := row{name: gameName(g) + "  ·  " + f.Label(), have: thousands(f.Pipelines), online: online}
+					r := row{name: gameName(g) + "  ·  " + f.Label(), have: thousands(f.Pipelines), online: online, game: g, file: f}
 					switch {
 					case f.Err != nil:
 						r.have, r.status = "–", "Unreadable cache, skipped"
 					case f.Missing > 0:
 						r.status = fmt.Sprintf("⬇ %s new  (%.0f MB)", thousands(f.Missing), float64(f.Download)/1e6)
-						r.pending = true
+						r.pending, r.checked = true, !unticked[f.Path]
 						todo++
 					case f.Extra > 0:
 						r.status = fmt.Sprintf("✔ Up to date  (+%s of your own)", thousands(f.Extra))
@@ -165,29 +211,56 @@ func (a *app) refresh() {
 			}
 			a.model.rows = rows
 			a.model.PublishRowsReset()
+			for i := range rows { // make the checkboxes redraw from the model
+				a.model.PublishRowChanged(i)
+			}
 			switch {
 			case len(rows) == 0:
 				a.setStatus("No games with shared shaders yet. Play a game once in Lichii, then check again.", grey)
 				a.syncBtn.SetText("Check again")
 			case todo > 0:
-				a.setStatus(fmt.Sprintf("New shaders are ready for %d of your Lichii builds.", todo), pinkDark)
-				a.syncBtn.SetText("⬇  Update shaders")
+				a.setStatus(fmt.Sprintf("New shaders are ready for %d of your Lichii builds. Untick any you don't want.", todo), pinkDark)
+				a.updateButton()
 			default:
 				a.bar.SetValue(1000)
 				a.setStatus("✔  All your games are up to date.", green)
 				a.syncBtn.SetText("⟳  Check again")
 			}
+			a.refreshExtras()
 		})
 	}()
 }
 
+// updateButton shows how many ticked rows will be updated.
+func (a *app) updateButton() {
+	pending := 0
+	for _, r := range a.model.rows {
+		if r.pending {
+			pending++
+		}
+	}
+	if pending == 0 {
+		a.syncBtn.SetText("⟳  Check again")
+		return
+	}
+	n := len(a.model.selected())
+	a.syncBtn.SetText(fmt.Sprintf("⬇  Update selected (%d)", n))
+	a.syncBtn.SetEnabled(n > 0 && !a.busy)
+}
+
 func (a *app) doSync() {
+	if a.syncing { // the main button is Cancel while downloading
+		atomic.StoreInt32(&a.cancel, 1)
+		a.syncBtn.SetText("Cancelling...")
+		a.syncBtn.SetEnabled(false)
+		return
+	}
 	if a.busy {
 		return
 	}
 	pending := false
-	for _, g := range a.found {
-		if g.Manifest != nil && g.Missing > 0 && len(g.Files) > 0 {
+	for _, r := range a.model.rows {
+		if r.pending {
 			pending = true
 		}
 	}
@@ -195,26 +268,47 @@ func (a *app) doSync() {
 		a.refresh()
 		return
 	}
+	sel := a.model.selected()
+	if len(sel) == 0 {
+		a.setStatus("Tick at least one row to update.", pinkDark)
+		return
+	}
 	if filepath.Clean(a.cfg.DataDir) == filepath.Clean(syncer.DefaultData()) && syncer.LichiiRunning() {
 		walk.MsgBox(a.mw, "Close Lichii first", "Lichii is running. Close it, then click Update shaders again.", walk.MsgBoxIconWarning)
 		return
 	}
 	a.setBusy(true)
+	a.syncing = true
+	atomic.StoreInt32(&a.cancel, 0)
+	a.syncBtn.SetText("✕  Cancel")
+	a.syncBtn.SetEnabled(true)
 	a.bar.SetValue(0)
 	a.setStatus("Starting...", grey)
 	go func() {
-		var err error
-		for _, g := range a.found {
-			if g.Manifest == nil || g.Missing == 0 {
-				continue
+		// group the ticked cache files by game
+		var order []*syncer.Game
+		files := map[*syncer.Game][]*syncer.CacheFile{}
+		for _, r := range sel {
+			if _, ok := files[r.game]; !ok {
+				order = append(order, r.game)
 			}
+			files[r.game] = append(files[r.game], r.file)
+		}
+		var err error
+		for _, g := range order {
 			a.Log("== " + gameName(g))
-			if err = syncer.SyncGame(syncer.Repo, g, a); err != nil {
+			if err = syncer.SyncFiles(syncer.Repo, g, files[g], a); err != nil {
 				break
 			}
 		}
 		a.mw.Synchronize(func() {
+			a.syncing = false
 			a.setBusy(false)
+			if err == syncer.ErrCancelled {
+				a.refresh()
+				a.setStatus("Cancelled - the cache being updated was left unchanged.", pinkDark)
+				return
+			}
 			if err != nil {
 				a.Log("ERROR: " + err.Error())
 				a.setStatus("Something went wrong - your shaders were not changed. See details.", pinkDark)
@@ -247,6 +341,11 @@ func (a *app) doLaunch() {
 
 func main() {
 	a := &app{cfg: loadSettings(), model: &gameModel{}}
+	a.model.onChange = func() {
+		if !a.busy {
+			a.updateButton()
+		}
+	}
 	appIcon, _ := walk.NewIconFromResourceId(iconID)
 	bigIcon, _ := walk.NewIconFromResourceIdWithSize(iconID, walk.Size{Width: 64, Height: 64})
 
@@ -254,7 +353,7 @@ func main() {
 		AssignTo: &a.mw,
 		Title:    "Lichii Shader Sync",
 		Icon:     appIcon,
-		Size:     Size{Width: 760, Height: 560},
+		Size:     Size{Width: 760, Height: 620},
 		MinSize:  Size{Width: 520, Height: 420},
 		Layout:   VBox{MarginsZero: true, SpacingZero: true},
 		Children: []Widget{
@@ -281,10 +380,13 @@ func main() {
 			Composite{
 				Layout: VBox{Margins: Margins{Left: 18, Top: 14, Right: 18, Bottom: 16}, Spacing: 10},
 				Children: []Widget{
+					LinkLabel{AssignTo: &a.updLink, Visible: false, Font: Font{Family: "Segoe UI Semibold", PointSize: 10},
+						OnLinkActivated: func(l *walk.LinkLabelLink) { openURL(l.URL()) }},
 					Label{Text: "YOUR GAMES", Font: Font{Family: "Segoe UI Semibold", PointSize: 8}, TextColor: grey},
 					TableView{
 						AssignTo:            &a.table,
 						Model:               a.model,
+						CheckBoxes:          true,
 						AlternatingRowBG:    true,
 						ColumnsOrderable:    false,
 						LastColumnStretched: true,
@@ -309,6 +411,18 @@ func main() {
 							HSpacer{},
 						},
 					},
+					Composite{
+						Layout: HBox{MarginsZero: true, Spacing: 8},
+						Children: []Widget{
+							PushButton{AssignTo: &a.shareBtn, Text: "⇪  Share my shaders", Enabled: false, OnClicked: a.doShare,
+								ToolTipText: "Save the shaders you have that the online pack doesn't, to post in Discord"},
+							PushButton{AssignTo: &a.undoBtn, Text: "↶  Undo last update", Enabled: false, OnClicked: a.doUndo,
+								ToolTipText: "Restore each cache to the version before its last update"},
+							PushButton{AssignTo: &a.bakBtn, Text: "🗑  Delete backups", Enabled: false, OnClicked: a.doDeleteBackups,
+								ToolTipText: "Free the disk space used by the .bak copies"},
+							HSpacer{},
+						},
+					},
 					Label{Text: "DETAILS", Font: Font{Family: "Segoe UI Semibold", PointSize: 8}, TextColor: grey},
 					TextEdit{AssignTo: &a.log, ReadOnly: true, VScroll: true, MinSize: Size{Height: 70},
 						Font: Font{Family: "Consolas", PointSize: 9}},
@@ -321,5 +435,6 @@ func main() {
 		return
 	}
 	a.refresh()
+	a.checkForUpdate()
 	a.mw.Run()
 }

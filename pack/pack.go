@@ -83,6 +83,7 @@ func Build(f *cache.File, titleID, tag, outDir string, prev *Manifest, perChunk 
 	m := &Manifest{Format: Format, TitleID: titleID, Source: f.Version}
 	have := map[string]bool{}
 	if prev != nil {
+		m.Name = prev.Name // keep the game name across pack updates
 		m.Chunks = append(m.Chunks, prev.Chunks...)
 		have = prev.Has()
 	}

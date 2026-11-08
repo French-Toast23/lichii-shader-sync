@@ -50,6 +50,71 @@ func (c *countingReader) skip(n int64) error {
 	return nil
 }
 
+// Each calls fn for every entry of a cache file, with the full entry bytes and its ID, reading
+// sequentially (shader code included). It returns the file version. Validation rules match Parse.
+func Each(path string, fn func(entry []byte, id [16]byte) error) (uint32, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	r := bufio.NewReaderSize(f, 1<<20)
+	h := make([]byte, HeaderSize)
+	if _, err := io.ReadFull(r, h); err != nil || !bytes.Equal(h[:8], []byte(Magic)) {
+		return 0, errors.New("not a yuzucach file")
+	}
+	ver := binary.LittleEndian.Uint32(h[8:])
+	for n := 0; ; n++ {
+		var e []byte
+		nb := make([]byte, 4)
+		if _, err := io.ReadFull(r, nb); err == io.EOF {
+			return ver, nil
+		} else if err != nil {
+			return 0, fmt.Errorf("entry %d: truncated", n)
+		}
+		e = append(e, nb...)
+		ne := binary.LittleEndian.Uint32(nb)
+		if ne < 1 || ne > 5 {
+			return 0, fmt.Errorf("entry %d: bad env count %d", n, ne)
+		}
+		var first uint32
+		for i := uint32(0); i < ne; i++ {
+			eh := make([]byte, envHeader)
+			if _, err := io.ReadFull(r, eh); err != nil {
+				return 0, fmt.Errorf("entry %d: truncated env header", n)
+			}
+			size, stage, err := envSize(eh, 0)
+			if err != nil {
+				return 0, fmt.Errorf("entry %d: %v", n, err)
+			}
+			if i == 0 {
+				first = stage
+			}
+			rest := make([]byte, size-envHeader)
+			if _, err := io.ReadFull(r, rest); err != nil {
+				return 0, fmt.Errorf("entry %d: truncated env", n)
+			}
+			e = append(e, eh...)
+			e = append(e, rest...)
+		}
+		k := GraphicsKey
+		if ne == 1 && first == 5 {
+			k = ComputeKey
+		}
+		key := make([]byte, k)
+		if _, err := io.ReadFull(r, key); err != nil {
+			return 0, fmt.Errorf("entry %d: truncated key", n)
+		}
+		e = append(e, key...)
+		var id [16]byte
+		s := sha256.Sum256(key)
+		copy(id[:], s[:16])
+		if err := fn(e, id); err != nil {
+			return 0, err
+		}
+	}
+}
+
 // Scan walks a cache file entry by entry, reading only each env header and the key and
 // skipping the shader code, so memory stays small and big files scan quickly.
 // It applies the same validation rules as Parse.

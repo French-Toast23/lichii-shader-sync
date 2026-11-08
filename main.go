@@ -4,12 +4,15 @@
 //	lichii-sync sync [-title ID] [-data DIR] [-launch lichii.exe] [-dry-run]
 //	lichii-sync pack -title ID [-prev manifest.json] CACHE OUTDIR TAG   (maintainer)
 //	lichii-sync info CACHE
+//	lichii-sync export [-title ID] OUT.bin.gz   your shaders the online pack lacks (to share)
 package main
 
 import (
 	"bufio"
+	"compress/gzip"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,7 +25,8 @@ import (
 
 type cli struct{ last int }
 
-func (c *cli) Log(m string) { fmt.Println(m) }
+func (c *cli) Log(m string)    { fmt.Println(m) }
+func (c *cli) Cancelled() bool { return false }
 func (c *cli) Progress(done, total int64) {
 	if total <= 0 {
 		return
@@ -66,9 +70,19 @@ func main() {
 			break
 		}
 		err = runPack(a[0], a[1], a[2], *prev, strings.ToUpper(*title), *per)
+	case "export":
+		fs := flag.NewFlagSet("export", flag.ExitOnError)
+		data := fs.String("data", syncer.DefaultData(), "Lichii data folder (holds cache\\shader)")
+		title := fs.String("title", "0400486024DEC000", "title ID")
+		fs.Parse(os.Args[2:])
+		if fs.NArg() != 1 {
+			err = fmt.Errorf("usage: export [-title TITLEID] OUT.bin.gz")
+			break
+		}
+		err = runExport(*data, *title, fs.Arg(0))
 	case "info":
 		var f *cache.File
-		if f, err = cache.Load(os.Args[2]); err == nil {
+		if f, err = loadCache(os.Args[2]); err == nil {
 			fmt.Printf("%s: version %d, %d entries\n", filepath.Base(os.Args[2]), f.Version, len(f.Entries))
 		}
 	default:
@@ -81,7 +95,7 @@ func main() {
 }
 
 func runSync(repo, data, only, launch string, dry bool) error {
-	if filepath.Clean(data) == filepath.Clean(syncer.DefaultData()) && syncer.LichiiRunning() {
+	if !dry && filepath.Clean(data) == filepath.Clean(syncer.DefaultData()) && syncer.LichiiRunning() {
 		return fmt.Errorf("Lichii is running - close it first (it writes to the cache while open)")
 	}
 	r := &cli{}
@@ -124,8 +138,46 @@ func runSync(repo, data, only, launch string, dry bool) error {
 	return nil
 }
 
+func runExport(data, title, out string) error {
+	games, err := syncer.Scan(syncer.Repo, data, &cli{})
+	if err != nil {
+		return err
+	}
+	for _, g := range games {
+		if strings.EqualFold(g.TitleID, title) {
+			n, err := syncer.ExportExtras(g, out)
+			if err == nil {
+				fmt.Printf("exported %d pipelines the online pack doesn't have -> %s\n", n, out)
+			}
+			return err
+		}
+	}
+	return fmt.Errorf("no cache folder for %s", title)
+}
+
+// loadCache reads a cache file, gunzipping it first if it ends in .gz (shared exports).
+func loadCache(path string) (*cache.File, error) {
+	if !strings.HasSuffix(strings.ToLower(path), ".gz") {
+		return cache.Load(path)
+	}
+	fh, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer fh.Close()
+	zr, err := gzip.NewReader(fh)
+	if err != nil {
+		return nil, err
+	}
+	b, err := ioutil.ReadAll(zr)
+	if err != nil {
+		return nil, err
+	}
+	return cache.Parse(b)
+}
+
 func runPack(cachePath, outDir, tag, prevPath, title string, per int) error {
-	f, err := cache.Load(cachePath)
+	f, err := loadCache(cachePath)
 	if err != nil {
 		return err
 	}
