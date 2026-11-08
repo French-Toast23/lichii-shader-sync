@@ -11,7 +11,7 @@ Downloads shared Vulkan shader caches into Lichii / Eden, so games stutter less 
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-0078d4?logo=windows&logoColor=white)](https://github.com/oceanpacificpeace/lichii-shader-sync/releases/latest)
 [![Go](https://img.shields.io/badge/Go-1.15%2B-00ADD8?logo=go&logoColor=white)](go.mod)
 
-**[⬇ Download for Windows](https://github.com/oceanpacificpeace/lichii-shader-sync/releases/latest/download/Lichii-Shader-Sync.exe)** &nbsp;·&nbsp; [All downloads](https://github.com/oceanpacificpeace/lichii-shader-sync/releases/latest)
+**[⬇ Download](https://github.com/oceanpacificpeace/lichii-shader-sync/releases/latest)**
 
 </div>
 
@@ -37,7 +37,7 @@ export __GL_SHADER_DISK_CACHE=1
 export __GL_SHADER_DISK_CACHE_SIZE=10737418240
 
 # Ensure it continues using your correct XDG path
-export __GL_SHADER_DISK_CACHE_PATH="~/.cache/nvidia/GLCache"
+export __GL_SHADER_DISK_CACHE_PATH="$HOME/.cache/nvidia/GLCache"
 ```
 
 Command line: `lichii-sync sync` (`-dry-run` to preview). Every download is checksum-verified and
@@ -48,6 +48,9 @@ validated; your previous cache is kept as `.bak`.
 lichii-sync pack -title <TITLEID> [-prev <TITLEID>.json] <cache.bin> out/ <TITLEID>-<date>
 gh release create <TITLEID>-<date> out/<new chunks>
 gh release upload manifests out/<TITLEID>.json --clobber
+gh api -X PATCH repos/<owner>/<repo>/releases/$(gh api repos/<owner>/<repo>/releases/tags/<TITLEID>-<date> --jq .id) -f make_latest=false
 ```
+Pack releases must not be marked *Latest*, or the README download button (the latest release page)
+shows a pack instead of the app. Upload the chunks before the manifest.
 
 Unofficial; not affiliated with Lichii or Eden.
