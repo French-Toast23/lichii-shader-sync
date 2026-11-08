@@ -121,9 +121,31 @@ type Game struct {
 	Download int64          // bytes to fetch for that file
 }
 
+// shaderRoot is the folder holding the per-title shader caches. Windows and portable installs
+// keep it under the data folder, but on Linux Lichii follows the XDG spec and puts the cache
+// somewhere else entirely: $XDG_CACHE_HOME/eden/shader, not <data>/cache/shader
+// (src/common/fs/path_util.cpp: eden_path_cache = GetDataDirectory("XDG_CACHE_HOME") / EDEN_DIR,
+// ShaderDir = eden_path_cache / SHADER_DIR).
+func shaderRoot(data string) string {
+	underData := filepath.Join(data, "cache", "shader")
+	if runtime.GOOS == "windows" {
+		return underData
+	}
+	cache := os.Getenv("XDG_CACHE_HOME")
+	if cache == "" {
+		cache = filepath.Join(os.Getenv("HOME"), ".cache")
+	}
+	for _, r := range []string{filepath.Join(cache, "eden", "shader"), underData} {
+		if fi, err := os.Stat(r); err == nil && fi.IsDir() {
+			return r
+		}
+	}
+	return underData
+}
+
 // Scan lists every game cache folder and, for each, the local caches and the online pack.
 func Scan(repo, data string, r Reporter) ([]*Game, error) {
-	root := filepath.Join(data, "cache", "shader")
+	root := shaderRoot(data)
 	dirs, err := ioutil.ReadDir(root)
 	if err != nil {
 		return nil, fmt.Errorf("no shader cache folder at %s - boot a game once in Lichii first", root)
