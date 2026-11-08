@@ -11,6 +11,8 @@ Downloads shared Vulkan shader cache into Lichii / Eden, so games start with ten
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-0078d4?logo=windows&logoColor=white)](#use)
 [![Go](https://img.shields.io/badge/Go-1.15%2B-00ADD8?logo=go&logoColor=white)](go.mod)
 
+**[⬇ Download for Windows](https://github.com/oceanpacificpeace/lichii-shader-sync/releases/latest/download/Lichii-Shader-Sync.exe)** &nbsp;·&nbsp; [All downloads](https://github.com/oceanpacificpeace/lichii-shader-sync/releases/latest)
+
 </div>
 
 ## Use
