@@ -326,8 +326,16 @@ func (a *app) doSync() {
 		var err error
 		for _, g := range order {
 			a.Log("== " + gameName(g))
-			if err = syncer.SyncFiles(syncer.Repo, g, files[g], a); err != nil {
+			e := syncer.SyncFiles(syncer.Repo, g, files[g], a)
+			if e == syncer.ErrCancelled {
+				err = e
 				break
+			}
+			if e != nil {
+				a.Log(e.Error())
+				if err == nil {
+					err = e // keep going with the other games, report at the end
+				}
 			}
 		}
 		a.mw.Synchronize(func() {
@@ -341,7 +349,7 @@ func (a *app) doSync() {
 			if err != nil {
 				a.Log("ERROR: " + err.Error())
 				a.showDetails(true)
-				a.setStatus("Something went wrong - your shaders were not changed. See details.", pinkDark)
+				a.setStatus("Some caches were not updated - see details. Update again to resume.", pinkDark)
 				return
 			}
 			a.refresh()
