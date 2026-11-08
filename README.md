@@ -19,8 +19,13 @@ Downloads shared Vulkan shader cache into Lichii / Eden, so games start with ten
 1. Boot the game once in your Lichii build (this creates the cache file), then close Lichii.
 2. Open **Lichii Shader Sync.exe** and click **Update shaders** (command line: `lichii-sync.exe`). It finds every `vulkan*.fork-vNN.bin` cache for the game, downloads only
    the pipelines you don't have from this repo's latest release, and merges them in.
-3. Start the game. For all pipelines to build at boot, add `EDEN_NX2_PRELOAD_ALL_PIPELINES=1` to
-   `%APPDATA%\eden\nx2_switches.txt`.
+3. Start the game.
+
+> **Don't turn on `EDEN_NX2_PRELOAD_ALL_PIPELINES` on build 117 or newer.** Those builds evict
+> pipelines unused for ~9000 frames (~2.5 min); with a big pack preloaded that throws away tens of
+> thousands at once and freezes the game for ~20 s. Leave it off: Lichii builds your recently used
+> pipelines at boot and the rest in the background as you reach them. (Older builds such as
+> Frizti v3 / build 95 don't evict, so preloading can still help there.)
 
 Options: `lichii-sync sync -launch "C:\path\lichii.exe"` syncs and starts Lichii; `-dry-run` only reports.
 
