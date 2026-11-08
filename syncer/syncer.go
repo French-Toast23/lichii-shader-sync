@@ -4,6 +4,7 @@ package syncer
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -15,6 +16,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"lichii-sync/cache"
@@ -60,18 +62,57 @@ func LichiiRunning() bool {
 var client = &http.Client{Timeout: 10 * time.Minute}
 
 func get(url string) ([]byte, int, error) {
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("User-Agent", "lichii-sync")
-	r, err := client.Do(req)
-	if err != nil {
-		return nil, 0, err
+	return getWithAccept(url, "")
+}
+
+func getWithAccept(url, accept string) ([]byte, int, error) {
+	var lastCode int
+	var lastErr error
+	const maxRetries = 2
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 1000 * time.Millisecond)
+		}
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, 0, err
+		}
+		req.Header.Set("User-Agent", "lichii-sync")
+		if accept != "" {
+			req.Header.Set("Accept", accept)
+		}
+		if attempt > 0 {
+			req.Header.Set("Cache-Control", "no-cache")
+			req.Header.Set("Pragma", "no-cache")
+		}
+		if strings.Contains(url, "api.github.com") {
+			if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
+				req.Header.Set("Authorization", "Bearer "+tok)
+			} else if tok := os.Getenv("GH_TOKEN"); tok != "" {
+				req.Header.Set("Authorization", "Bearer "+tok)
+			}
+		}
+		r, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		lastCode = r.StatusCode
+		if r.StatusCode == 200 {
+			b, err := ioutil.ReadAll(r.Body)
+			r.Body.Close()
+			return b, 200, err
+		}
+		r.Body.Close()
+		lastErr = fmt.Errorf("%s: HTTP %d", url, r.StatusCode)
+		if r.StatusCode == 504 && attempt >= 1 {
+			return nil, r.StatusCode, lastErr
+		}
+		if r.StatusCode != 429 && r.StatusCode != 500 && r.StatusCode != 502 && r.StatusCode != 503 && r.StatusCode != 504 {
+			return nil, r.StatusCode, lastErr
+		}
 	}
-	defer r.Body.Close()
-	if r.StatusCode != 200 {
-		return nil, r.StatusCode, fmt.Errorf("%s: HTTP %d", url, r.StatusCode)
-	}
-	b, err := ioutil.ReadAll(r.Body)
-	return b, 200, err
+	return nil, lastCode, lastErr
 }
 
 // CacheFile is one local vulkan*.fork-vNN.bin. Each Lichii build reads its own file.
@@ -145,6 +186,17 @@ func shaderRoot(data string) string {
 	return underData
 }
 
+// getBaseURL returns the base URL for releases downloads. Can be overridden via LICHII_MIRROR.
+func getBaseURL(repo string) string {
+	if m := os.Getenv("LICHII_MIRROR"); m != "" {
+		if !strings.HasSuffix(m, "/") {
+			m += "/"
+		}
+		return m
+	}
+	return "https://github.com/" + repo + "/releases/download/"
+}
+
 // Scan lists every game cache folder and, for each, the local caches and the online pack.
 func Scan(repo, data string, r Reporter) ([]*Game, error) {
 	root := shaderRoot(data)
@@ -152,7 +204,7 @@ func Scan(repo, data string, r Reporter) ([]*Game, error) {
 	if err != nil {
 		return nil, fmt.Errorf("no shader cache folder at %s - boot a game once in Lichii first", root)
 	}
-	base := "https://github.com/" + repo + "/releases/download/"
+	base := getBaseURL(repo)
 	var games []*Game
 	for _, d := range dirs {
 		if !d.IsDir() || !TitleRe.MatchString(d.Name()) {
@@ -176,6 +228,17 @@ func Scan(repo, data string, r Reporter) ([]*Game, error) {
 			g.Files = append(g.Files, cf)
 		}
 		mb, code, err := get(base + ManifestTag + "/" + g.TitleID + ".json")
+		if err != nil && code != 404 {
+			if r != nil {
+				r.Log(fmt.Sprintf("%s: direct manifest download failed (%v), trying GitHub API...", g.TitleID, err))
+			}
+			var apiErr error
+			mb, apiErr = fetchManifestAPI(repo, g.TitleID)
+			if apiErr == nil {
+				err = nil
+				code = 200
+			}
+		}
 		if err == nil {
 			if m, err := pack.ParseManifest(mb); err == nil {
 				g.Manifest = m
@@ -234,22 +297,139 @@ func plan(cf *CacheFile, m *pack.Manifest) ([]pack.Chunk, int64, int) {
 	return need, size, miss
 }
 
+var (
+	manifestMu     sync.Mutex
+	manifestAssets map[string]string // TITLEID.JSON -> api asset download url
+)
+
+func fetchManifestAPI(repo, titleID string) ([]byte, error) {
+	manifestMu.Lock()
+	defer manifestMu.Unlock()
+	if manifestAssets == nil {
+		tagURL := "https://api.github.com/repos/" + repo + "/releases/tags/" + ManifestTag
+		b, code, err := get(tagURL)
+		if err != nil {
+			return nil, fmt.Errorf("fetching manifests release (HTTP %d): %v", code, err)
+		}
+		var rel struct {
+			Assets []struct {
+				Name string `json:"name"`
+				URL  string `json:"url"`
+			} `json:"assets"`
+		}
+		if err := json.Unmarshal(b, &rel); err != nil {
+			return nil, err
+		}
+		manifestAssets = make(map[string]string)
+		for _, a := range rel.Assets {
+			manifestAssets[strings.ToUpper(a.Name)] = a.URL
+		}
+	}
+	assetURL, ok := manifestAssets[strings.ToUpper(titleID)+".JSON"]
+	if !ok {
+		return nil, fmt.Errorf("no manifest asset for %s", titleID)
+	}
+	b, code, err := getWithAccept(assetURL, "application/octet-stream")
+	if err != nil {
+		return nil, fmt.Errorf("fetching manifest asset %s (HTTP %d): %v", titleID, code, err)
+	}
+	return b, nil
+}
+
 // chunkStore downloads each chunk once per run into a temp folder, so several cache files
 // can reuse it without holding everything in memory.
 type chunkStore struct {
-	base, dir string
+	repo       string
+	base       string
+	dir        string
+	r          Reporter
+	mu         sync.Mutex
+	directDown bool                         // true if releases/download has failed with 5xx
+	tagAssets  map[string]map[string]string // tag -> filename -> api asset download url
 }
 
 func (s *chunkStore) entries(c pack.Chunk) ([]cache.Entry, error) {
 	p := filepath.Join(s.dir, c.File)
 	z, err := ioutil.ReadFile(p)
-	if err != nil {
-		if z, _, err = get(s.base + c.Tag + "/" + c.File); err != nil {
-			return nil, err
+	if err == nil {
+		if es, err := pack.Decode(z, c); err == nil {
+			return es, nil
 		}
-		ioutil.WriteFile(p, z, 0o644)
+		os.Remove(p)
 	}
+
+	s.mu.Lock()
+	skipDirect := s.directDown
+	s.mu.Unlock()
+
+	var code int
+	if !skipDirect {
+		z, code, err = get(s.base + c.Tag + "/" + c.File)
+		if err != nil && (code == 504 || code == 502 || code == 503) {
+			s.mu.Lock()
+			s.directDown = true
+			s.mu.Unlock()
+		}
+	}
+	if skipDirect || err != nil {
+		if !skipDirect && s.r != nil {
+			s.r.Log(fmt.Sprintf("%s: direct download failed (%v), switching to GitHub API...", c.File, err))
+		}
+		var apiErr error
+		z, apiErr = s.fetchAPI(c)
+		if apiErr != nil {
+			if strings.Contains(apiErr.Error(), "403") && s.r != nil {
+				s.r.Log("GitHub API rate limit reached (60/hr). Set GITHUB_TOKEN or retry in a few minutes.")
+			}
+			if err != nil {
+				return nil, fmt.Errorf("%s: HTTP %d (API fallback: %v)", s.base+c.Tag+"/"+c.File, code, apiErr)
+			}
+			return nil, apiErr
+		}
+	}
+	ioutil.WriteFile(p, z, 0o644)
 	return pack.Decode(z, c)
+}
+
+func (s *chunkStore) fetchAPI(c pack.Chunk) ([]byte, error) {
+	s.mu.Lock()
+	if s.tagAssets == nil {
+		s.tagAssets = make(map[string]map[string]string)
+	}
+	assets, ok := s.tagAssets[c.Tag]
+	if !ok {
+		tagURL := "https://api.github.com/repos/" + s.repo + "/releases/tags/" + c.Tag
+		b, code, err := get(tagURL)
+		if err != nil {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("release tag %s: HTTP %d: %v", c.Tag, code, err)
+		}
+		var rel struct {
+			Assets []struct {
+				Name string `json:"name"`
+				URL  string `json:"url"`
+			} `json:"assets"`
+		}
+		if err := json.Unmarshal(b, &rel); err != nil {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("parsing release %s: %v", c.Tag, err)
+		}
+		assets = make(map[string]string)
+		for _, a := range rel.Assets {
+			assets[a.Name] = a.URL
+		}
+		s.tagAssets[c.Tag] = assets
+	}
+	assetURL, found := assets[c.File]
+	s.mu.Unlock()
+	if !found {
+		return nil, fmt.Errorf("asset %s not found in release %s", c.File, c.Tag)
+	}
+	b, code, err := getWithAccept(assetURL, "application/octet-stream")
+	if err != nil {
+		return nil, fmt.Errorf("asset %s: HTTP %d: %v", c.File, code, err)
+	}
+	return b, nil
 }
 
 // SyncGame downloads what each local cache file of g is missing and merges it in.
@@ -263,12 +443,18 @@ func SyncFiles(repo string, g *Game, files []*CacheFile, r Reporter) error {
 		return nil
 	}
 	// download onto the cache's own drive (next to the game folders), not %TEMP% on C:
-	dir, err := ioutil.TempDir(filepath.Dir(g.Dir), ".lichii-sync-")
-	if err != nil {
+	// Use .chunks folder to preserve downloaded chunks across runs if a sync is interrupted
+	dir := filepath.Join(filepath.Dir(g.Dir), ".chunks")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	defer os.RemoveAll(dir)
-	store := &chunkStore{base: "https://github.com/" + repo + "/releases/download/", dir: dir}
+	store := &chunkStore{
+		repo: repo,
+		base: getBaseURL(repo),
+		dir:  dir,
+		r:    r,
+	}
+	var syncErr error
 	for _, cf := range files {
 		name := filepath.Base(cf.Path)
 		if cf.idx == nil {
@@ -288,13 +474,17 @@ func SyncFiles(repo string, g *Game, files []*CacheFile, r Reporter) error {
 		}
 		if err != nil {
 			r.Log(fmt.Sprintf("%s: skipped, %v (your file was not changed)", name, err))
+			syncErr = err
 			continue
 		}
 		r.Log(fmt.Sprintf("%s: done, %d pipelines (+%d)", name, cf.Pipelines+added, added))
 		cf.Pipelines += added
 		cf.Missing, cf.Download = 0, 0
 	}
-	return nil
+	if syncErr == nil {
+		os.RemoveAll(dir)
+	}
+	return syncErr
 }
 
 // mergeInto streams the original file into a temp file, appends the missing entries chunk by
