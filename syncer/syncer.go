@@ -135,7 +135,9 @@ func shaderRoot(data string) string {
 	if cache == "" {
 		cache = filepath.Join(os.Getenv("HOME"), ".cache")
 	}
-	for _, r := range []string{filepath.Join(cache, "eden", "shader"), underData} {
+	// A data folder with its own cache (portable install, or one given with -data) comes first,
+	// so we never sync a different install than the one asked for; otherwise use the XDG cache.
+	for _, r := range []string{underData, filepath.Join(cache, "eden", "shader")} {
 		if fi, err := os.Stat(r); err == nil && fi.IsDir() {
 			return r
 		}

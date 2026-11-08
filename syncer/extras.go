@@ -144,7 +144,7 @@ func hexOf(id [16]byte) string { return hex.EncodeToString(id[:]) }
 // ---- app update check ----
 
 // Version of this build; releases are tagged the same way (v1.2.3).
-const Version = "v1.1.0"
+const Version = "v1.1.1"
 
 // LatestApp returns the newest app release tag (v*) and its page, ignoring pack/manifest releases.
 func LatestApp(repo string) (tag, page string, err error) {
