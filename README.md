@@ -24,8 +24,21 @@ Downloads shared Vulkan shader caches into Lichii / Eden, so games stutter less 
 > builds evict unused pipelines after ~2.5 min, which freezes the game for ~20 s when a big pack is preloaded.
 >
 > **Optional warm-up** (once, and again after GPU driver updates): set the GPU's shader cache size to
-> 10 GB or Unlimited, turn preload on, boot the game, wait at the title screen until compiling finishes,
+> 10 GB or Unlimited in your Nvidia control panel, turn preload on, boot the game, wait at the title screen until compiling finishes,
 > quit, then turn preload off. The driver keeps the compiled shaders, so first-time hitches are shorter.
+>
+> On Linux add those in .bashrc to change your shader cache size: 
+
+```
+# Enable NVIDIA Shader Disk Cache
+export __GL_SHADER_DISK_CACHE=1
+
+# Set the cache size limit to 10 GB (in bytes)
+export __GL_SHADER_DISK_CACHE_SIZE=10737418240
+
+# Ensure it continues using your correct XDG path
+export __GL_SHADER_DISK_CACHE_PATH="~/.cache/nvidia/GLCache"
+```
 
 Command line: `lichii-sync sync` (`-dry-run` to preview). Every download is checksum-verified and
 validated; your previous cache is kept as `.bak`.
