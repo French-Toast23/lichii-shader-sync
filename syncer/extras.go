@@ -91,10 +91,10 @@ type Backup struct {
 	Size          int64
 }
 
-// Backups lists every .bak next to a cache file under data\cache\shader.
+// Backups lists every .bak next to a cache file in the shader cache folder (see shaderRoot).
 func Backups(data string) []Backup {
 	var out []Backup
-	root := filepath.Join(data, "cache", "shader")
+	root := shaderRoot(data)
 	dirs, _ := ioutil.ReadDir(root)
 	for _, d := range dirs {
 		if !d.IsDir() || !TitleRe.MatchString(d.Name()) {
