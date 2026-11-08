@@ -7,7 +7,7 @@
 Downloads shared Vulkan shader caches into Lichii / Eden, so games stutter less on first play.
 
 [![Downloads](https://img.shields.io/github/downloads/oceanpacificpeace/lichii-shader-sync/total?color=2ea043&logo=github)](https://github.com/oceanpacificpeace/lichii-shader-sync/releases)
-[![OoT shaders](https://img.shields.io/badge/Ocarina%20of%20Time-76%2C923%20shaders-d92b5a?logo=nintendoswitch&logoColor=white)](https://github.com/oceanpacificpeace/lichii-shader-sync/releases/tag/0400486024DEC000-20261107)
+[![OoT shaders](https://img.shields.io/badge/Ocarina%20of%20Time-88%2C982%20shaders-d92b5a?logo=nintendoswitch&logoColor=white)](https://github.com/oceanpacificpeace/lichii-shader-sync/releases/tag/0400486024DEC000-20261107)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-0078d4?logo=windows&logoColor=white)](https://github.com/oceanpacificpeace/lichii-shader-sync/releases/latest)
 [![Go](https://img.shields.io/badge/Go-1.15%2B-00ADD8?logo=go&logoColor=white)](go.mod)
 
