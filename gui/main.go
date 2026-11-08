@@ -15,7 +15,7 @@ import (
 	"lichii-sync/syncer"
 )
 
-const iconID = 1 // RT_GROUP_ICON embedded by tools/mksyso
+const iconID = 1 // RT_GROUP_ICON embedded in rsrc_windows_amd64.syso
 
 var (
 	pink     = walk.RGB(0xD9, 0x2B, 0x5A)
